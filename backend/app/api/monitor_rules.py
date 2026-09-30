@@ -21,11 +21,11 @@ def _data_dir(request: Request) -> Path:
 
 
 def _reconcile_index_asset_type(rule: dict, repo) -> dict:
-    """纠正误存为 stock 的指数规则 (asset_type → index)。
+    """纠正误存为 stock 的指数/ETF 规则 (asset_type → index/etf)。
 
-    个股弹窗加监控 / 点位提醒等入口未传 asset_type, 指数 symbol 的规则被存成
-    stock, 导致监控中心显示「个股」、引擎在股票轮评估 (指数 symbol 永不命中)。
-    仅当规则全部 symbols 都 resolve 为指数时纠正 (股票+指数混合池不动)。
+    个股弹窗加监控 / 点位提醒等入口未传 asset_type, 指数/ETF symbol 的规则被存成
+    stock, 导致监控中心显示「个股」、引擎在股票轮评估 (指数/ETF symbol 永不命中)。
+    仅当规则全部 symbols 都 resolve 为同一非 stock 类型时纠正 (混合池不动)。
     """
     if rule.get("asset_type", "stock") != "stock" or rule.get("scope") != "symbols":
         return rule
@@ -33,10 +33,13 @@ def _reconcile_index_asset_type(rule: dict, repo) -> dict:
     if not symbols:
         return rule
     try:
-        if all(repo.resolve_asset_type(s) == "index" for s in symbols):
-            rule["asset_type"] = "index"
-    except Exception:  # noqa: BLE001
-        pass
+        types = {repo.resolve_asset_type(s) for s in symbols}
+    except Exception:
+        return rule
+    if len(types) == 1:
+        only = next(iter(types))
+        if only in ("index", "etf"):
+            rule["asset_type"] = only
     return rule
 
 
@@ -97,10 +100,13 @@ class RuleModel(BaseModel):
     conditions: list[ConditionModel] = []
     logic: str = "and"        # and | or
     cooldown_seconds: int = 3600
+    # date 类型 (日期提醒): 纯日历窗口, 无 conditions
+    remind_date: str | None = None   # YYYY-MM-DD
+    lead_days: int = 0               # 提前 N 天进入提醒窗口
     severity: str = "info"    # info | warn | critical
     webhook_url: str = ""     # Webhook 推送地址 (推送到 QMT 等外部软件, 待定)
     webhook_enabled: bool = False  # 兼容老规则 (已由 webhook_channels 取代, 仅做向后兼容读)
-    webhook_channels: list[str] = []  # 命中时推送的外部渠道 (合法值 'feishu' | 'wecom')
+    webhook_channels: list[str] = []  # 合法值: feishu | wecom | custom | email
     message: str = ""
     # abnormal 专属 (异动边缘监控): any | 3d | 10d | 30d
     abnormal_window: str = "any"
@@ -166,6 +172,7 @@ def get_options(request: Request):
             {"key": "abnormal", "label": "异动监控"},
             {"key": "sector", "label": "板块监控"},
             {"key": "volume_delta", "label": "轮询放量"},
+            {"key": "date", "label": "日期提醒"},
         ],
         "scopes": [
             {"key": "symbols", "label": "指定标的"},
@@ -288,6 +295,9 @@ def save_rule(req: RuleModel, request: Request):
             raise HTTPException(status_code=400, detail=str(e)) from e
     # 编辑现有规则时, 保留原 created_at (避免按时间排序时位置跳动)
     existing = monitor_rules.load_one(_data_dir(request), rule["id"])
+    # 批次派生规则由「持仓提醒」页托管, 监控中心只读 (启停/改/删均回持仓页)
+    if existing and existing.get("lot_id"):
+        raise HTTPException(status_code=409, detail="该规则由「持仓提醒」页托管, 请在持仓提醒页修改")
     if existing and existing.get("created_at"):
         rule["created_at"] = existing["created_at"]
     try:
@@ -344,6 +354,10 @@ def save_rule(req: RuleModel, request: Request):
 def delete_rule(rule_id: str, request: Request):
     if not monitor_rules.ID_RE.match(rule_id):
         raise HTTPException(status_code=400, detail="规则 id 非法")
+    # 批次派生规则由「持仓提醒」页托管, 删除需在持仓页操作 (级联清理派生规则)
+    existing = monitor_rules.load_one(_data_dir(request), rule_id)
+    if existing and existing.get("lot_id"):
+        raise HTTPException(status_code=409, detail="该规则由「持仓提醒」页托管, 请在持仓提醒页删除批次")
     deleted = monitor_rules.delete_one(_data_dir(request), rule_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="规则不存在")

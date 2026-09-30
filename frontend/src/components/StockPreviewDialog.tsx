@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2, Activity } from 'lucide-react'
@@ -6,8 +6,10 @@ import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
-import { fmtPct } from '@/lib/format'
+import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
+import { fmtPct, cnDateFromUtc } from '@/lib/format'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
+import { NavPager, NavWrapToast } from '@/components/NavPager'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { StockMultiDayIntradayChart } from '@/components/StockMultiDayIntradayChart'
 import { DatePicker } from '@/components/DatePicker'
@@ -18,6 +20,9 @@ import { usePreferences } from '@/lib/useSharedQueries'
 import { setFocusSymbol, clearFocusSymbol } from '@/lib/useQuoteStream'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { storage } from '@/lib/storage'
+import { navItemKey, type NavItem } from '@/lib/listNav'
+import { useListNav } from '@/lib/useListNav'
+import { DEFAULT_INTRADAY_DAYS } from '@/lib/kline'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
 
 interface Props {
@@ -32,6 +37,10 @@ interface Props {
     signals?: string[]
     message?: string
   } | null
+  /** 有序候选列表: 提供后支持左右键/顶栏按钮切股, 标题栏显示 n/N */
+  navList?: NavItem[]
+  /** 切股回调: 收到目标 symbol/name, 由调用方更新预览状态 */
+  onNavigate?: (symbol: string, name?: string) => void
 }
 
 // ===== 板块标识（与 Screener 列表一致）=====
@@ -50,11 +59,11 @@ interface PriceAlertDraft {
 }
 const INTRADAY_DAY_OPTIONS = [1, 5, 10, 20] as const
 
-function loadIntradayDays(): number | null {
-  const saved = storage.stockPreviewIntradayDays.get(10)
+function loadIntradayDays(): number {
+  const saved = storage.stockPreviewIntradayDays.get(DEFAULT_INTRADAY_DAYS)
   return INTRADAY_DAY_OPTIONS.includes(saved as typeof INTRADAY_DAY_OPTIONS[number])
     ? saved
-    : null
+    : DEFAULT_INTRADAY_DAYS
 }
 
 function boardTag(symbol: string): { label: string; color: string } | null {
@@ -79,11 +88,12 @@ function fmtAbnormalCalcTime(asofSec: number): string {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
-export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props) {
+export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList: navListSource, onNavigate }: Props) {
   const [view, setView] = useState<PreviewView>('daily')
   const [intradayDays, setIntradayDays] = useState<number | null>(loadIntradayDays)
   const [dateRange, setDateRange] = useState(getDefaultRange)
   const [showMonitorEditor, setShowMonitorEditor] = useState(false)
+  const customNames = useCustomSignalNames()
   const [priceAlertDraft, setPriceAlertDraft] = useState<PriceAlertDraft | null>(null)
   const [maximized, setMaximized] = useState(false)
   const qc = useQueryClient()
@@ -119,7 +129,16 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
     () => symbol ? buildMonitorPriceLines(monitorRules.data?.rules ?? [], symbol) : [],
     [monitorRules.data?.rules, symbol],
   )
-  const inWatchlist = (watchlist.data?.symbols ?? []).some((s: any) => s.symbol === symbol)
+  const watchlistEntry = useMemo(
+    () => (watchlist.data?.symbols ?? []).find(s => s.symbol === symbol),
+    [watchlist.data, symbol],
+  )
+  const inWatchlist = !!watchlistEntry
+  // 加入自选日 (北京时间)。该日不在当前K线区间内或恰是非交易日时竖线不画, 由工具栏文字兜底。
+  const addedDate = useMemo(
+    () => cnDateFromUtc(watchlistEntry?.added_at) || null,
+    [watchlistEntry],
+  )
 
   const toggleWatchlist = useMutation({
     mutationFn: ({
@@ -137,18 +156,40 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
     },
   })
 
-  // ESC 关闭
+  // ===== 切股导航 =====
+  // onClose 只有 ESC 用; onNavigate 由 useListNav 内部承接 (支持内联 lambda)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+
+  const nav = useListNav<NavItem>({
+    items: navListSource ?? [],
+    keyOf: navItemKey,
+    currentKey: symbol,
+    onNavigate: n => onNavigate?.(n.symbol, n.name),
+    // 点位监控弹窗/规则编辑器打开时方向键不切股 (与 ESC 的 !priceAlertDraft 守卫同层级)
+    blocked: () => !!priceAlertDraft || showMonitorEditor,
+    wrapHints: { head: '已到榜首', tail: '已到末尾' },
+  })
+
+  // 邻近预取目标: 当前股左右相邻两只 (首↔尾循环), 交由 StockPanel 提前拉取日K/财务/分时缓存
+  const prefetchSymbols = useMemo(() => nav.neighbors.map(n => n.symbol), [nav.neighbors])
+
+  // ESC 关闭 (左右键切股由 useListNav 接管)
   useEffect(() => {
     if (!symbol) return
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !priceAlertDraft) onClose()
+      if (e.key === 'Escape' && !priceAlertDraft) onCloseRef.current()
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [symbol, onClose, priceAlertDraft])
+  }, [symbol, priceAlertDraft])
 
+  // 弹窗内切股时保留当前视图 (分时 tab 下切股不应跳回日K);
+  // 仅当弹窗首次打开 (symbol 从 null 变非空) 时重置为日K。
+  const prevSymbolRef = useRef<string | null>(null)
   useEffect(() => {
-    if (symbol) setView('daily')
+    if (prevSymbolRef.current == null && symbol != null) setView('daily')
+    prevSymbolRef.current = symbol
     setPriceAlertDraft(null)
   }, [symbol])
 
@@ -222,12 +263,13 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
             exit={{ opacity: 0, scale: 0.97, y: 8 }}
             transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
             className={cn(
-              'relative rounded-card border border-border bg-base shadow-2xl overflow-hidden flex flex-col transition-all duration-200 ease-smooth',
-              maximized ? 'w-screen h-screen max-w-none max-h-none' : 'w-[92vw] max-w-[1100px] max-h-[95vh]',
+              'relative rounded-dialog border border-border bg-surface shadow-2xl shadow-black/50 overflow-hidden flex flex-col transition-all duration-200 ease-smooth',
+              maximized ? 'w-screen h-screen max-w-none max-h-none' : 'w-[92vw] max-w-[1200px] max-h-[95vh]',
             )}
           >
-            {/* 顶栏 */}
-            <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-5 shrink-0">
+            {/* 顶栏: 单行 = 个股身份 + 视图/区间控件 + 操作按钮。纯样式重排, 交互逻辑不变 */}
+            <div className="shrink-0 border-b border-border/60 bg-elevated/30">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 pb-2 pt-2.5 sm:px-5">
               <div className="flex min-w-0 items-center gap-2">
                 {(() => {
                   const board = symbol ? boardTag(symbol) : null
@@ -237,14 +279,47 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                     </span>
                   ) : null
                 })()}
-                <span className="shrink-0 font-mono text-sm font-medium text-foreground">{symbol}</span>
-                {name && <span className="truncate text-xs text-muted">{name}</span>}
+                <span className="shrink-0 font-mono text-[15px] font-semibold tracking-tight text-foreground">{symbol}</span>
+                {name && <span className="truncate text-xs text-secondary">{name}</span>}
+
+                {/* 切股导航: 上一只 / n·N / 下一只 */}
+                <NavPager nav={nav} prevLabel="上一只" nextLabel="下一只" />
               </div>
 
-              <div className="flex shrink-0 items-center gap-1">
+              {/* 视图/区间控件: 原第二行并入顶行, 紧邻操作按钮 (原「自选于」标注位置) */}
+              <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2.5">
+                {/* 日K / 分时 切换 */}
+                <div role="tablist" aria-label="图表视图" className="inline-flex shrink-0 items-center rounded border border-border/60 bg-base/60 p-0.5">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={view === 'daily'}
+                    onClick={() => setView('daily')}
+                    className={`inline-flex h-6 items-center gap-1 rounded px-2.5 text-[11px] transition-colors ${
+                      view === 'daily' ? 'bg-accent/20 text-accent font-medium' : 'text-muted hover:text-secondary hover:bg-elevated/60'
+                    }`}
+                  >
+                    <LineChart className="h-3 w-3" />
+                    日 K
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={view === 'intraday'}
+                    onClick={() => setView('intraday')}
+                    className={`inline-flex h-6 items-center gap-1 rounded px-2.5 text-[11px] transition-colors ${
+                      view === 'intraday' ? 'bg-accent/20 text-accent font-medium' : 'text-muted hover:text-secondary hover:bg-elevated/60'
+                    }`}
+                  >
+                    <Clock className="h-3 w-3" />
+                    分时
+                  </button>
+                </div>
+                <span className="h-4 w-px shrink-0 bg-border/70" />
                 {/* 区间选择 — 随视图切换 */}
                 {view === 'daily' ? (
-                  <div className="flex items-center gap-1">
+                  <div className="inline-flex items-center gap-2">
+                    <div className="inline-flex items-center rounded border border-border/60 bg-base/60 p-0.5">
                     {PRESETS.map(p => {
                       const now = new Date()
                       const s = new Date(now)
@@ -260,22 +335,23 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                             ns.setMonth(ns.getMonth() - p.months)
                             setDateRange({ start: ns.toISOString().slice(0, 10), end })
                           }}
-                          className={`h-6 px-1.5 rounded text-[11px] transition-colors cursor-pointer
+                          className={`h-6 rounded px-2.5 text-[11px] transition-colors cursor-pointer
                             ${isActive
-                              ? 'bg-accent/20 text-accent font-medium border border-accent/30'
-                              : 'text-muted hover:text-foreground hover:bg-elevated border border-transparent'
+                              ? 'bg-accent/20 text-accent font-medium'
+                              : 'text-muted hover:text-secondary hover:bg-elevated/60'
                             }`}
                         >
                           {p.label}
                         </button>
                       )
                     })}
+                    </div>
                     <DatePicker
                       value={dateRange.start}
                       onChange={(v) => setDateRange(prev => ({ ...prev, start: v }))}
                       max={dateRange.end}
                     />
-                    <span className="text-muted/40 text-[10px]">~</span>
+                    <span className="text-muted/70 text-[10px]">~</span>
                     <DatePicker
                       value={dateRange.end}
                       onChange={(v) => setDateRange(prev => ({ ...prev, end: v }))}
@@ -283,18 +359,18 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                     />
                   </div>
                 ) : (
-                  <div className="flex items-center gap-1">
-                    <div className="inline-flex shrink-0 items-center rounded border border-border bg-elevated p-0.5" aria-label="分时周期">
+                  <div className="inline-flex items-center gap-2">
+                    <div className="inline-flex shrink-0 items-center rounded border border-border/60 bg-base/60 p-0.5" aria-label="分时周期">
                       {dayOptions.map(days => (
                         <button
                           key={days}
                           type="button"
                           aria-pressed={effectiveIntradayDays === days}
                           onClick={() => selectIntradayDays(days)}
-                          className={`h-5 rounded px-1.5 font-mono text-[10px] transition-colors ${
+                          className={`h-6 rounded px-2.5 text-[11px] transition-colors ${
                             effectiveIntradayDays === days
-                              ? 'bg-accent/20 text-accent'
-                              : 'text-muted hover:text-secondary'
+                              ? 'bg-accent/20 text-accent font-medium'
+                              : 'text-muted hover:text-secondary hover:bg-elevated/60'
                           }`}
                         >
                           {days}日
@@ -303,39 +379,9 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                     </div>
                   </div>
                 )}
+              </div>
 
-                <span className="mx-0.5 h-4 w-px shrink-0 bg-border" />
-
-                {/* 日K / 分时 切换 */}
-                <div role="tablist" aria-label="图表视图" className="inline-flex shrink-0 items-center rounded border border-border bg-elevated p-0.5">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={view === 'daily'}
-                    onClick={() => setView('daily')}
-                    className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[11px] transition-colors ${
-                      view === 'daily' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
-                    }`}
-                  >
-                    <LineChart className="h-3 w-3" />
-                    日 K
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={view === 'intraday'}
-                    onClick={() => setView('intraday')}
-                    className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[11px] transition-colors ${
-                      view === 'intraday' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
-                    }`}
-                  >
-                    <Clock className="h-3 w-3" />
-                    分时
-                  </button>
-                </div>
-
-                <span className="mx-0.5 h-4 w-px shrink-0 bg-border" />
-
+              <div className="flex shrink-0 items-center gap-1">
                 {/* 自选 */}
                 {inWatchlist ? (
                   <button
@@ -387,12 +433,13 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
 
                 <button
                   onClick={onClose}
-                  className="shrink-0 rounded-btn p-1.5 text-secondary transition-colors hover:bg-elevated hover:text-foreground"
+                  className="shrink-0 rounded-btn p-1.5 text-secondary transition-colors hover:bg-danger/15 hover:text-danger"
                   aria-label="关闭个股详情"
                   title="关闭"
                 >
                   <X className="h-4 w-4" />
                 </button>
+              </div>
               </div>
             </div>
 
@@ -429,7 +476,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   {triggerInfo.signals && triggerInfo.signals.length > 0 && (
                     <div className="flex items-center gap-1 flex-wrap">
                       {triggerInfo.signals.map((s, j) => (
-                        <span key={j} className="rounded bg-accent/10 px-1.5 py-0.5 text-[9px] text-accent/80">{cnSignal(s)}</span>
+                        <span key={j} className="rounded bg-accent/10 px-1.5 py-0.5 text-[9px] text-accent/80">{cnSignal(s, customNames)}</span>
                       ))}
                     </div>
                   )}
@@ -464,7 +511,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                           }`}
                         >
                           {parseInt(w, 10)}日{' '}
-                          <span className={info.value >= 0 ? 'text-bull' : 'text-bear'}>{fmtPct(info.value, 1)}</span>
+                          <span className={info.value >= 0 ? 'text-bull' : 'text-bear'}>{fmtPct(info.value)}</span>
                           <span className="text-muted"> / ±{(info.threshold * 100).toFixed(0)}%</span>
                           <span className="text-muted"> · 接近{(info.closeness * 100).toFixed(0)}%</span>
                         </span>
@@ -480,8 +527,9 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
               )
             })()}
 
-            {/* 图表内容 */}
-            <div className="flex-1 overflow-auto p-4">
+            {/* 图表内容 — 内衬卡片容器, 图表区与弹窗背景分层 (纯样式) */}
+            <div className="flex-1 overflow-auto p-3 sm:p-4">
+              <div className="rounded border border-border/50 bg-base/30 p-3">
               {view === 'daily' ? (
                 <StockPanel
                   symbol={symbol}
@@ -491,13 +539,20 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   priceLines={monitorPriceLines}
                   onPriceDoubleClick={openPriceAlert}
                   refetchIntervalMs={intradayRefetchMs}
+                  prefetchSymbols={prefetchSymbols}
+                  intradayDays={effectiveIntradayDays}
+                  dailyKlineFlex="flex-[1.4]"
+                  addedDate={addedDate}
                 />
               ) : (
-                <>
+                <div className="flex flex-col gap-3">
                 <StockPanel
                   symbol={symbol}
                   dateRange={dateRange}
                   infoBarOnly
+                  prefetchSymbols={prefetchSymbols}
+                  intradayDays={effectiveIntradayDays}
+                  addedDate={addedDate}
                 />
                 <StockMultiDayIntradayChart
                   symbol={symbol}
@@ -507,8 +562,9 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   priceLines={monitorPriceLines}
                   onPriceDoubleClick={openPriceAlert}
                 />
-                </>
+                </div>
               )}
+              </div>
             </div>
 
             {/* 扩展插槽: 对话框底部二开区 (无注册时不渲染) */}
@@ -546,6 +602,9 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                 </motion.div>
               )}
             </AnimatePresence>
+
+            {/* 首↔尾循环弱提示 */}
+            <NavWrapToast message={nav.wrapMsg} />
           </motion.div>
         </div>
       )}

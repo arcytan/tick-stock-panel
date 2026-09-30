@@ -19,19 +19,12 @@ from typing import Any
 import polars as pl
 
 from app.services.ext_data import ExtConfig, ExtConfigStore
+from app.services.index_const import CORE_INDEX_NAMES, CORE_INDEX_SYMBOLS
 from app.services.screener import ScreenerService
 
 # ================================================================
-# 常量(与 overview.py 保持同步;复盘复盘仅 A 股核心指数)
+# 常量(核心指数清单单一权威: app.services.index_const)
 # ================================================================
-
-CORE_INDEX_NAMES = {
-    "000001.SH": "上证指数",
-    "399001.SZ": "深证成指",
-    "399006.SZ": "创业板指",
-    "000680.SH": "科创综指",
-}
-CORE_INDEX_SYMBOLS = tuple(CORE_INDEX_NAMES.keys())
 
 _DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")
 
@@ -244,6 +237,16 @@ def _symbol_keys(row: dict, config: ExtConfig) -> list[str]:
     return keys
 
 
+def _leader_sort_key(row: dict) -> float:
+    """领涨股排序键: 缺涨跌幅的成分股排最后。
+
+    0.00% 是有效涨跌幅, 不能与"无行情"合并成同一个哨兵值 —— 板块整体下跌时
+    平盘股就是领涨股。
+    """
+    value = _finite(row.get("change_pct"))
+    return value if value is not None else float("-inf")
+
+
 def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: int | None = None) -> dict:
     if not rows:
         return {"leading": [], "lagging": []}
@@ -288,7 +291,7 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
         changes = [v for v in changes if v is not None]
         if not changes:
             continue
-        leader = max(stocks, key=lambda s: _finite(s.get("change_pct")) or -999)
+        leader = max(stocks, key=_leader_sort_key)
         items.append({
             "name": name,
             "count": len(stocks),

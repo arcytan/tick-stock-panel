@@ -150,6 +150,7 @@ const DEFAULT_ROUTING: Record<ProviderField, string> = {
   daily_data_provider: 'tickflow',
   adj_factor_provider: 'tickflow',
   minute_data_provider: 'tickflow',
+  full_minute_data_provider: 'tickflow',
   depth5_data_provider: 'tickflow',
   realtime_data_provider: 'tickflow',
   financial_data_provider: 'tickflow',
@@ -612,19 +613,13 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
     daily: dailyPref,
     adj_factor: adjPref === 'same_as_daily' ? dailyPref : adjPref,
     minute: prefs.data?.minute_data_provider || 'tickflow',
+    full_minute: prefs.data?.full_minute_data_provider || 'tickflow',
     realtime: prefs.data?.realtime_data_provider || 'tickflow',
     depth5: prefs.data?.depth5_data_provider || 'tickflow',
     financial: prefs.data?.financial_data_provider || 'tickflow',
   }
-  const servingDatasets = (name: string) => {
-    const ids = Object.entries(effProvider).filter(([, v]) => v === name).map(([k]) => k)
-    if (name === 'tickflow') {
-      // 不可路由能力 (field=null, 如全量分钟): 仅 TickFlow 提供, usable 即服务中
-      ids.push(...(matrix.data?.capabilities ?? [])
-        .filter(c => c.field == null && c.usable).map(c => c.id))
-    }
-    return ids
-  }
+  const servingDatasets = (name: string) =>
+    Object.entries(effProvider).filter(([, v]) => v === name).map(([k]) => k)
   const servingSetOf = (name: string) => new Set(servingDatasets(name))
 
   const matrixCaps = matrix.data?.capabilities ?? []
@@ -1020,7 +1015,7 @@ function PluginDetail({ plugin, isActive, matrixCaps, servingSet }: {
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1 flex-wrap">
-            <h3 className="text-base font-semibold text-foreground">{plugin.display_name}</h3>
+            <h3 className="text-[16px] leading-6 font-semibold text-foreground">{plugin.display_name}</h3>
             <span className="text-[10px] text-muted/50 uppercase tracking-wider">插件 · {plugin.runtime}</span>
             <span className="rounded bg-warning/15 px-1 py-0.5 text-[9px] font-medium leading-none text-warning">第三方</span>
             {isActive && (
@@ -1169,7 +1164,7 @@ function TickFlowDetail({ active, matrix }: { active: boolean; matrix?: Capabili
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h2 className="text-base font-semibold text-foreground">TickFlow</h2>
+            <h2 className="text-[16px] leading-6 font-semibold text-foreground">TickFlow</h2>
             <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning">第三方</span>
             <AllTiersBadge />
             {active && (

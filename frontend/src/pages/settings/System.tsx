@@ -5,7 +5,7 @@
  */
 import { useState, useCallback, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Settings2, Trash2, RefreshCw, Bell, Volume2, Info } from 'lucide-react'
+import { Settings2, Trash2, RefreshCw, Bell, Volume2, Info, ExternalLink, CheckCircle2, Download } from 'lucide-react'
 import { usePreferences, useVersion } from '@/lib/useSharedQueries'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -15,6 +15,8 @@ import { SOUND_OPTIONS, previewSound } from '@/lib/notificationSound'
 import {
   listZhVoices, previewVoice, activateVoice, getCurrentVoiceURI,
 } from '@/lib/voiceBroadcast'
+import { loadStockExternalTemplate, saveStockExternalTemplate } from '@/lib/stock-external-link'
+import { useUpdateCheck } from '@/lib/updateCheck'
 
 export function SettingsSystemPanel() {
   const qc = useQueryClient()
@@ -23,7 +25,15 @@ export function SettingsSystemPanel() {
   const [saving, setSaving] = useState(false)
 
   const screenerAutoRun = prefs?.screener_auto_run ?? true
+  const [extTpl, setExtTpl] = useState(() => loadStockExternalTemplate())
   const [clearing, setClearing] = useState(false)
+
+  // ===== 检查更新 (共享单例 store: 与侧栏左下角 NEW 徽标同源, 手动检查绕过缓存) =====
+  const {
+    status: updateState,
+    info: updateInfo,
+    check: checkUpdate,
+  } = useUpdateCheck()
   const [toastEnabled, setToastEnabled] = useState(() => {
     try { return localStorage.getItem('alert_toast_enabled') !== '0' } catch { return true }
   })
@@ -290,6 +300,30 @@ export function SettingsSystemPanel() {
 
       <section className="rounded-card border border-border bg-surface p-5 mt-6">
         <div className="flex items-center gap-2 mb-4">
+          <ExternalLink className="h-4 w-4 text-accent" />
+          <h3 className="text-sm font-medium text-foreground">个股详情外链</h3>
+        </div>
+
+        <div className="flex items-center justify-between gap-4 py-2">
+          <div className="min-w-0">
+            <div className="text-sm text-foreground">详情页 URL 模板</div>
+            <div className="text-[11px] text-muted truncate">{"支持 {code} {market} {symbol} · 留空关闭外链"}</div>
+          </div>
+          <input
+            value={extTpl}
+            onChange={(e) => {
+              setExtTpl(e.target.value)
+              saveStockExternalTemplate(e.target.value)
+            }}
+            placeholder="https://..."
+            spellCheck={false}
+            className="w-[26rem] max-w-[60%] h-8 px-2.5 rounded-btn border border-border bg-base text-xs font-mono text-foreground focus:border-accent/50 focus:outline-none"
+          />
+        </div>
+      </section>
+
+      <section className="rounded-card border border-border bg-surface p-5 mt-6">
+        <div className="flex items-center gap-2 mb-4">
           <Trash2 className="h-4 w-4 text-accent" />
           <h3 className="text-sm font-medium text-foreground">缓存</h3>
         </div>
@@ -337,18 +371,46 @@ export function SettingsSystemPanel() {
         <div className="flex items-center justify-between gap-4 py-2">
           <div className="min-w-0">
             <div className="text-sm text-foreground">检查更新</div>
-            <div className="text-[11px] text-muted truncate">前往 GitHub Releases 下载最新版本</div>
+            <div className="text-[11px] text-muted truncate">
+              {updateState === 'found' && updateInfo
+                ? `发现新版本 ${updateInfo.latest} (当前 ${versionData?.version ?? '—'})`
+                : updateState === 'latest'
+                  ? `已是最新版本 (${versionData?.version ?? '—'})`
+                  : updateState === 'error'
+                    ? '检查失败 (网络受限?), 可直接前往 Releases'
+                    : '对比 GitHub Releases 最新 Release, 提示新版本'}
+            </div>
           </div>
-          <a
-            href="https://github.com/shy3130/tickflow-stock-panel/releases/latest"
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn text-xs
-                       bg-elevated text-secondary hover:text-foreground transition-colors shrink-0"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            检查更新
-          </a>
+          <div className="flex shrink-0 items-center gap-2">
+            {updateState === 'found' && updateInfo && (
+              <a
+                href={updateInfo.url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn text-xs
+                           bg-accent text-white hover:bg-accent/90 transition-colors"
+              >
+                <Download className="h-3.5 w-3.5" />
+                前往下载
+              </a>
+            )}
+            <button
+              onClick={checkUpdate}
+              disabled={updateState === 'checking'}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn text-xs
+                         bg-elevated text-secondary hover:text-foreground transition-colors
+                         disabled:opacity-50"
+            >
+              {updateState === 'checking' ? (
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+              ) : updateState === 'latest' ? (
+                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              {updateState === 'checking' ? '检查中…' : updateState === 'latest' ? '已检查' : '检查更新'}
+            </button>
+          </div>
         </div>
       </section>
     </>

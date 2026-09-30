@@ -86,7 +86,7 @@ export function ActiveJobCard({ job }: { job: PipelineJob }) {
         </div>
         {!isDone && (
           <div className="font-mono text-2xl font-bold tracking-tight">
-            {job.progress}<span className="text-base text-muted">%</span>
+            {job.progress}<span className="text-[16px] leading-6 text-muted">%</span>
           </div>
         )}
       </div>
@@ -131,7 +131,7 @@ export function ActiveJobCard({ job }: { job: PipelineJob }) {
           {job.error.includes('超时自动取消') && (
             <div className="mt-1 text-[10px] text-muted">
               判定依据是「无进度」而非总时长, 任务只要仍在推进就不会被中断;
-              若网络环境较慢可在 设置 → 超时设置 中调大停滞阈值。
+              若网络环境较慢可在 设置 → 网络设置 中调大停滞阈值。
             </div>
           )}
         </div>
