@@ -28,7 +28,7 @@ it('shows daily OHLC by default, labels hovered minute, restores on exit and dat
   cleanup = async () => { await act(async () => root.unmount()) }
   const render = async (date = daily.date) => {
     await act(async () => root.render(<EChartsIntraday data={rows.map(row => ({ ...row, datetime: row.datetime.replace(daily.date, date) }))}
-      date={date} dailySummary={{ ...daily, date }} />))
+      date={date} prevClose={120} dailySummary={{ ...daily, date }} />))
   }
   await render()
   expect(host.textContent).toContain('日K')
@@ -36,6 +36,7 @@ it('shows daily OHLC by default, labels hovered minute, restores on exit and dat
   await act(async () => chart.handlers.updateAxisPointer({ axesInfo: [{ axisDim: 'x', value: 110 }] }))
   expect(host.textContent).toContain('11:20')
   expect(host.textContent).toContain('118.28')
+  expect(host.textContent).toContain('涨跌幅-1.46%')
   await act(async () => chart.handlers.globalout())
   expect(host.textContent).toContain('118.16')
   expect(host.textContent).not.toContain('11:20')

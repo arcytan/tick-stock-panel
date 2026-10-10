@@ -617,6 +617,14 @@ export function EChartsIntraday({
                 <span style={{ display: 'inline-block', width: 14, height: 2, background: priceClr }} />
                 <span style={{ color: priceClr }}>{d.close.toFixed(2)}</span>
               </span>
+              {hovered && chg != null && prevClose != null && prevClose > 0 && (
+                <span className="flex items-center gap-x-1">
+                  <span className="text-muted">涨跌幅</span>
+                  <span style={{ color: priceClr }}>
+                    {chg > 0 ? '+' : ''}{(chg / prevClose * 100).toFixed(2)}%
+                  </span>
+                </span>
+              )}
               {showAvgLine && <span className="flex items-center gap-x-1">
                 <span style={{ display: 'inline-block', width: 14, height: 2, background: THEME.avgLine }} />
                 <span style={{ color: THEME.avgLine }}>{avg != null ? avg.toFixed(2) : '—'}</span>
