@@ -108,8 +108,8 @@ function SponsorIntro() {
     <>
       本项目赞助商 · OpenAI 兼容中转，单一接口直连 400+ 主流大模型，<span className="font-medium text-amber-600 dark:text-amber-400">Claude、ChatGPT、Gemini</span> 等国际模型直连稳定不掉线。
       <span className="font-medium text-amber-600 dark:text-amber-400">DeepSeek v4.1 Flash {range}</span>，
-      <span className="text-muted">全场最高优惠 {maxPct}%</span>，
-      <span className="font-medium text-amber-600 dark:text-amber-400">邀请链接注册赠送 1000 RH 积分</span><span className="text-muted">(积分可用于视频生成)</span>。
+      <span className="text-muted">全场最高</span><span className="font-medium text-amber-600 dark:text-amber-400">优惠 {maxPct}%</span>，
+      <span>邀请链接注册享</span><span className="font-medium text-amber-600 dark:text-amber-400">首充满减</span><span className="text-muted">(满减额度以官网邀请页为准)</span>。
     </>
   )
 }
@@ -460,12 +460,16 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
     setTestResult(null)
     try {
       // 只探测当前表单值, 绝不保存 — 测试失败不能把坏配置写进已保存配置。
-      const r = await api.testAiSettings({
-        provider,
-        ...(isCodexProvider ? {} : { base_url: baseUrl.trim(), protocol }),
-        model: (isCodexProvider ? codexModel : model).trim(),
-        ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
-      })
+      const r = await api.testAiSettings(
+        {
+          provider,
+          ...(isCodexProvider ? {} : { base_url: baseUrl.trim(), protocol }),
+          model: (isCodexProvider ? codexModel : model).trim(),
+          ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+        },
+        // codex 探测是真实最小 exec (CLI 启动+一次生成), 默认 30s 会掐断
+        isCodexProvider ? { timeoutMs: 90_000 } : undefined,
+      )
       setTestResult({
         ok: r.ok,
         msg: r.ok ? `连通成功 · ${r.model ?? provider}` : (r.error ?? '未知错误'),
